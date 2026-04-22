@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/logo.png" alt="claude-bus" width="280" />
+</p>
+
 # claude-bus
 
 An MCP server that lets two or more Claude Code sessions on the same machine
