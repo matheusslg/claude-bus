@@ -1,0 +1,38 @@
+{
+  "name": "claude-bus",
+  "version": "0.1.0",
+  "description": "MCP message bus for cross-session Claude Code communication with persistent log",
+  "type": "module",
+  "bin": {
+    "claude-bus-mcp": "./dist/mcp.js",
+    "claude-bus": "./dist/cli.js"
+  },
+  "main": "./dist/mcp.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev:mcp": "tsx src/mcp.ts",
+    "dev:cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "better-sqlite3": "^11.5.0",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}
