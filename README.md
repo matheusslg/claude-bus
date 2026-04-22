@@ -15,10 +15,19 @@ inspectable via CLI. No approval gate yet (planned for v0.2 via file-drop).
 ## Requirements
 
 - Node 20+
-- Claude Code 2.1.80 or newer (on 2.1.116 at time of writing)
-- You must launch Claude Code with `--channels` for the server to be able to
-  push notifications into the session. `--channels` disables `AskUserQuestion`
-  and plan mode while active, and requires claude.ai login (not API key).
+- Claude Code 2.1.80 or newer (on 2.1.117 at time of writing)
+- `claude-bus` is a custom channel, which is not on Anthropic's approved
+  allowlist. During the channels research preview, start each session with
+  the development flag so Claude Code registers the notification listener:
+
+  ```bash
+  claude --dangerously-load-development-channels server:claude-bus
+  ```
+
+  Do **not** combine with `--channels` — the bypass is per-entry and
+  `--channels` entries require the approved allowlist. Channels require a
+  claude.ai or setup-token OAuth (not a raw API key) and disable
+  `AskUserQuestion` and plan mode while active.
 
 ## Install (local dev)
 
@@ -44,7 +53,11 @@ Then add to a Claude Code session via `.mcp.json` in your project:
 
 Or globally: `claude mcp add claude-bus -- claude-bus-mcp`.
 
-Start each Claude Code session you want on the bus with `claude --channels`.
+Start each Claude Code session you want on the bus with:
+
+```bash
+claude --dangerously-load-development-channels server:claude-bus
+```
 
 ## Tools exposed
 

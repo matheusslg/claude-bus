@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { openDb } from "./db.js";
 import { deregisterSelf, registerSelf } from "./peer.js";
 import { startPollLoop, type ChannelEmitter } from "./poll.js";
@@ -86,9 +89,20 @@ async function main(): Promise<void> {
     },
   };
 
+  const errorLog =
+    process.env.CLAUDE_BUS_ERROR_LOG ??
+    join(homedir(), ".claude-bus", "mcp-errors.log");
+  mkdirSync(dirname(errorLog), { recursive: true });
+
   const poll = startPollLoop(db, self, emitter, {
     onError: (err) => {
-      process.stderr.write(`[claude-bus] poll error: ${String(err)}\n`);
+      const line = `${new Date().toISOString()} [${self.id}] poll error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`;
+      try {
+        appendFileSync(errorLog, line);
+      } catch {
+        // Best-effort; don't crash the poll loop on log write failure.
+      }
+      process.stderr.write(line);
     },
   });
 
