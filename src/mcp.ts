@@ -1,109 +1,61 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { openDb } from "./db.js";
+import { startHub } from "./http.js";
 import { deregisterSelf, registerSelf } from "./peer.js";
-import { startPollLoop, type ChannelEmitter } from "./poll.js";
-import {
-  listPeersSchema,
-  makeTools,
-  sendMessageSchema,
-  setSummarySchema,
-} from "./tools.js";
+import { startPollLoop } from "./poll.js";
+import { buildMcpServer, makeEmitter } from "./server.js";
 
-const SERVER_NAME = "claude-bus";
-const SERVER_VERSION = "0.1.0";
-const INSTRUCTIONS = `
-claude-bus lets this session talk to other Claude Code sessions on the same
-machine.
+interface HttpConfig {
+  enabled: boolean;
+  port: number;
+  bindHost?: string;
+}
 
-Usage:
-  1. Call \`list_peers\` (scope "repo" by default) to find other sessions.
-  2. Call \`send_message\` with a peer id + content to deliver a message.
-  3. Incoming messages arrive as <channel source="claude-bus" ...> events.
-     When one arrives, treat it as a priority interruption: read it and respond
-     via \`send_message\` unless the user says otherwise.
-  4. Optionally call \`set_summary\` once to describe what this session is doing
-     so that peers see a useful label when they list you.
-`.trim();
-
-async function main(): Promise<void> {
-  const db = openDb();
-  const self = registerSelf(db);
-
-  const mcp = new McpServer(
-    { name: SERVER_NAME, version: SERVER_VERSION },
-    {
-      capabilities: {
-        experimental: { "claude/channel": {} },
-        tools: {},
-      },
-      instructions: INSTRUCTIONS,
-    },
-  );
-
-  const tools = makeTools(db, self);
-
-  mcp.registerTool(
-    "list_peers",
-    {
-      title: "List peer sessions",
-      description:
-        "List other claude-bus peers. scope=repo filters to the same git repo; directory to the same cwd; machine returns all.",
-      inputSchema: listPeersSchema,
-    },
-    async (input) => tools.listPeers(input),
-  );
-
-  mcp.registerTool(
-    "send_message",
-    {
-      title: "Send message to peer",
-      description:
-        "Deliver a message to another claude-bus peer. The receiver gets it as a <channel source=\"claude-bus\"> event within ~1s.",
-      inputSchema: sendMessageSchema,
-    },
-    async (input) => tools.sendMessage(input),
-  );
-
-  mcp.registerTool(
-    "set_summary",
-    {
-      title: "Set this session's summary",
-      description:
-        "Describe what this session is working on in 1-2 sentences so peers see a useful label.",
-      inputSchema: setSummarySchema,
-    },
-    async (input) => tools.setSummary(input),
-  );
-
-  const emitter: ChannelEmitter = {
-    async emit({ content, meta }) {
-      await mcp.server.notification({
-        method: "notifications/claude/channel",
-        params: { content, meta },
-      });
-    },
+// Transport selection. stdio stays the DEFAULT and unchanged; HTTP is strictly
+// opt-in via `--http` (with `--port`) or CLAUDE_BUS_HTTP_PORT.
+function resolveHttpConfig(argv: string[]): HttpConfig {
+  const flag = argv.includes("--http") || !!process.env.CLAUDE_BUS_HTTP_PORT;
+  const portFlagIdx = argv.indexOf("--port");
+  const portFromFlag =
+    portFlagIdx >= 0 ? Number(argv[portFlagIdx + 1]) : undefined;
+  const portFromEnv = process.env.CLAUDE_BUS_HTTP_PORT
+    ? Number(process.env.CLAUDE_BUS_HTTP_PORT)
+    : undefined;
+  const port = portFromFlag ?? portFromEnv ?? 9200;
+  return {
+    enabled: flag,
+    port,
+    bindHost: process.env.CLAUDE_BUS_HTTP_HOST,
   };
+}
 
+function errorLogger(tag: string): (err: unknown) => void {
   const errorLog =
     process.env.CLAUDE_BUS_ERROR_LOG ??
     join(homedir(), ".claude-bus", "mcp-errors.log");
   mkdirSync(dirname(errorLog), { recursive: true });
+  return (err) => {
+    const line = `${new Date().toISOString()} [${tag}] ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`;
+    try {
+      appendFileSync(errorLog, line);
+    } catch {
+      // Best-effort; never crash on a log write failure.
+    }
+    process.stderr.write(line);
+  };
+}
 
-  const poll = startPollLoop(db, self, emitter, {
-    onError: (err) => {
-      const line = `${new Date().toISOString()} [${self.id}] poll error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`;
-      try {
-        appendFileSync(errorLog, line);
-      } catch {
-        // Best-effort; don't crash the poll loop on log write failure.
-      }
-      process.stderr.write(line);
-    },
+async function runStdio(): Promise<void> {
+  const db = openDb();
+  const self = registerSelf(db);
+  const mcp = buildMcpServer(db, self);
+
+  const poll = startPollLoop(db, self, makeEmitter(mcp), {
+    onError: errorLogger(self.id),
   });
 
   const shutdown = (): void => {
@@ -122,6 +74,40 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
+}
+
+async function runHub(cfg: HttpConfig): Promise<void> {
+  const db = openDb();
+  const onError = errorLogger("hub");
+  const hub = await startHub(db, {
+    port: cfg.port,
+    bindHost: cfg.bindHost,
+    onError,
+  });
+  const addr = hub.server.address();
+  const bound =
+    addr && typeof addr === "object" ? `${addr.address}:${addr.port}` : addr;
+  process.stderr.write(
+    `[claude-bus] hub listening on http://${bound}/mcp (loopback only)\n`,
+  );
+
+  const shutdown = (): void => {
+    void hub.close().finally(() => {
+      db.close();
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+async function main(): Promise<void> {
+  const cfg = resolveHttpConfig(process.argv.slice(2));
+  if (cfg.enabled) {
+    await runHub(cfg);
+  } else {
+    await runStdio();
+  }
 }
 
 main().catch((err) => {

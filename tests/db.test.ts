@@ -13,7 +13,7 @@ import {
   setPeerSummary,
   upsertPeer,
 } from "../src/db.js";
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 
 let tmp: string;
 let db: Database.Database;
@@ -28,7 +28,15 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function peer(id: string, overrides: Partial<{ cwd: string; git_root: string | null; summary: string }> = {}) {
+function peer(
+  id: string,
+  overrides: Partial<{
+    cwd: string;
+    git_root: string | null;
+    summary: string;
+    host: string | null;
+  }> = {},
+) {
   const now = new Date().toISOString();
   return {
     id,
@@ -38,6 +46,7 @@ function peer(id: string, overrides: Partial<{ cwd: string; git_root: string | n
     summary: overrides.summary ?? "",
     registered_at: now,
     last_seen: now,
+    host: overrides.host ?? null,
   };
 }
 
@@ -149,6 +158,62 @@ describe("db", () => {
       .all() as { id: string }[];
     // a stays (already delivered), b is dropped (pending for t), c stays (different target)
     expect(remaining.map((r) => r.id).sort()).toEqual([a, c].sort());
+  });
+
+  it("stores and returns the host column", () => {
+    upsertPeer(db, peer("aaaaaaaa", { host: "mac-mini" }));
+    upsertPeer(db, peer("bbbbbbbb", { host: null }));
+    const rows = listPeersInScope(db, "machine", {
+      id: "zzzzzzzz",
+      cwd: "/x",
+      git_root: null,
+    });
+    expect(rows.find((p) => p.id === "aaaaaaaa")?.host).toBe("mac-mini");
+    expect(rows.find((p) => p.id === "bbbbbbbb")?.host).toBeNull();
+  });
+
+  it("migrates a pre-host DB: adds column, keeps all rows", () => {
+    const tmp2 = mkdtempSync(join(tmpdir(), "claude-bus-mig-"));
+    const p = join(tmp2, "old.db");
+    // Build a DB with the OLD schema (no host column) and seed a row.
+    const old = new Database(p);
+    old.exec(`
+      CREATE TABLE peers (
+        id TEXT PRIMARY KEY, pid INTEGER NOT NULL, cwd TEXT NOT NULL,
+        git_root TEXT, summary TEXT NOT NULL DEFAULT '',
+        registered_at TEXT NOT NULL, last_seen TEXT NOT NULL
+      );`);
+    const now = new Date().toISOString();
+    old
+      .prepare(
+        `INSERT INTO peers (id,pid,cwd,git_root,summary,registered_at,last_seen)
+         VALUES ('legacy01',999,'/old',NULL,'legacy',?,?)`,
+      )
+      .run(now, now);
+    old.close();
+
+    // Reopen with the new code — migrate() must add the column, lose nothing.
+    const migrated = openDb(p);
+    const cols = (
+      migrated.prepare(`PRAGMA table_info(peers)`).all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(cols).toContain("host");
+    const row = migrated.prepare(`SELECT * FROM peers`).get() as {
+      id: string;
+      summary: string;
+      host: string | null;
+    };
+    expect(row.id).toBe("legacy01");
+    expect(row.summary).toBe("legacy");
+    expect(row.host).toBeNull();
+    // Re-running openDb is idempotent (no throw on second migrate).
+    migrated.close();
+    const again = openDb(p);
+    expect(again.prepare(`SELECT COUNT(*) AS n FROM peers`).get()).toEqual({
+      n: 1,
+    });
+    again.close();
+    rmSync(tmp2, { recursive: true, force: true });
   });
 
   it("setPeerSummary updates only the target peer", () => {

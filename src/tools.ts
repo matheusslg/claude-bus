@@ -69,6 +69,7 @@ export function makeTools(
         peers: live.map((p) => ({
           id: p.id,
           summary: p.summary,
+          host: p.host,
           cwd: p.cwd,
           git_root: p.git_root,
           registered_at: p.registered_at,

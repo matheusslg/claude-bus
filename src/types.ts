@@ -10,6 +10,7 @@ export interface Peer {
   summary: string;
   registered_at: string;
   last_seen: string;
+  host: string | null;
 }
 
 export interface Message {
