@@ -67,7 +67,7 @@ claude --dangerously-load-development-channels server:claude-bus
 
 | Tool | Purpose |
 |---|---|
-| `list_peers({ scope: "repo" \| "directory" \| "machine" })` | Find other sessions. `repo` is the default. |
+| `list_peers({ scope: "repo" \| "directory" \| "machine" })` | Find other sessions. `repo` is the default. Each peer now carries a `host` so you can tell which machine it's on once the bus spans two. |
 | `send_message({ to_id, content })` | Deliver a message. Receiver sees it within ~1s as a `<channel>` event. |
 | `set_summary({ summary })` | Label this session so peers see what you're doing in `list_peers`. |
 
@@ -88,6 +88,79 @@ claude-bus stats                          # counts + top senders
 - Database: `~/.claude-bus/bus.db` (override with `CLAUDE_BUS_DB=/path/to.db`).
 - Schema: two tables — `peers`, `messages` — with a `status` column sized for
   the upcoming approval gate (`pending → approved/rejected → delivered`).
+- `peers.host` records the machine a peer registered from (`os.hostname()`).
+  Existing databases are migrated in place on open — the column is added with an
+  `ALTER TABLE` and back-filled `NULL`, no rows touched.
+
+## Cross-machine: the HTTP hub
+
+The default transport is **stdio**, one subprocess per session, all on one
+machine. To let sessions on **two** machines talk, run one host as a **hub**:
+it owns the database and speaks MCP over HTTP; remote sessions reach it through
+an SSH port-forward.
+
+```
+  Mac session ─stdio─┐                          ┌─ SSH tunnel ─ Box session
+                     ├─▶  hub (owns bus.db)  ◀──┤   (http)
+  Mac session ─stdio─┘      127.0.0.1:9200      └─ SSH tunnel ─ Box session
+```
+
+**Start the hub** (on whichever machine owns the DB):
+
+```bash
+claude-bus-mcp --http --port 9200      # or set CLAUDE_BUS_HTTP_PORT=9200
+# → [claude-bus] hub listening on http://127.0.0.1:9200/mcp (loopback only)
+```
+
+The hub binds `127.0.0.1` only — never `0.0.0.0`. It **refuses** to start on a
+non-loopback address. There is no listening socket exposed to the network, so
+there is nothing to authenticate: reach the hub from another machine with an SSH
+port-forward, and the bus inherits SSH's authentication.
+
+Sessions **on the hub machine** keep using stdio, unchanged. A stdio peer and
+an HTTP peer backed by the same database see each other in `list_peers` and
+message each other transparently — the transport is invisible to the tools.
+
+**On the remote machine**, forward the port and point an MCP client at it:
+
+```bash
+ssh -N -L 9200:127.0.0.1:9200 <hub-host>     # in a spare terminal / autossh
+```
+
+```json
+{
+  "mcpServers": {
+    "claude-bus-hub": {
+      "type": "http",
+      "url": "http://127.0.0.1:9200/mcp",
+      "headers": { "X-Claude-Bus-Host": "my-ec2-box" }
+    }
+  }
+}
+```
+
+`X-Claude-Bus-Host` is optional but recommended: it's how a remote session tells
+the hub which machine it's really on, so `list_peers` shows a truthful `host`
+instead of defaulting to the hub's hostname. (`X-Claude-Bus-Cwd` is likewise
+honoured if you want repo/directory scoping to work across the tunnel.)
+
+### ⚠️ Never share the database directory across machines
+
+The tempting shortcut — put `~/.claude-bus` on sshfs/NFS so both machines open
+the same `bus.db` — **will corrupt your database.** SQLite runs in WAL mode
+(`journal_mode = WAL`), and WAL requires a shared-memory file (`bus.db-shm`)
+that every reader mmaps on the *same host*; that cannot work across a network
+filesystem. Fall back to rollback journaling and you're depending on POSIX
+advisory locks, which network filesystems implement incorrectly — the standard
+outcome is silent corruption. The hub model exists precisely so the DB never
+crosses a filesystem boundary: exactly one host opens the file, everyone else
+talks to it over HTTP.
+
+**Delivery caveat:** HTTP delivery is at-most-once. If a remote client's SSE
+stream is mid-reconnect (an SSH-tunnel blip) at the instant a message is pushed,
+that message can be dropped while still marked `delivered` in the log. It does
+not happen on a steady connection. Message-replay across reconnects (an SDK
+`EventStore` + `Last-Event-ID`) is the upgrade path if this ever bites.
 
 ## Roadmap
 
@@ -97,8 +170,9 @@ claude-bus stats                          # counts + top senders
 - **v0.3** — localhost web dashboard. Live stream + approve/inject buttons.
   Introduces a small broker process at that point.
 
-Out of scope: multi-machine transport, auth/encryption, message retention
-policy, permission relay for tool-use dialogs.
+Multi-machine transport shipped as the HTTP hub (above). Still out of scope:
+in-band auth/encryption (the hub delegates both to the SSH tunnel), message
+retention policy, and permission relay for tool-use dialogs.
 
 ## Why not claude-peers-mcp / let-them-talk / claude-tempo
 

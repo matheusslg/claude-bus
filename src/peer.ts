@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { hostname } from "node:os";
 import type Database from "better-sqlite3";
 import type { Peer } from "./types.js";
 import { deletePeer, deletePendingFor, touchPeer, upsertPeer } from "./db.js";
@@ -31,19 +32,35 @@ export interface SelfContext {
   pid: number;
   cwd: string;
   git_root: string | null;
+  host: string | null;
 }
 
-export function registerSelf(db: Database.Database): SelfContext {
+// Overrides let the HTTP hub register a peer on behalf of a *remote* session:
+// the hub process runs on the DB host, but the peer itself is on another
+// machine, so it must be able to announce its own host (and cwd) rather than
+// inherit the hub's. stdio sessions pass nothing and describe themselves.
+export interface RegisterOverrides {
+  host?: string | null;
+  cwd?: string;
+  git_root?: string | null;
+}
+
+export function registerSelf(
+  db: Database.Database,
+  overrides: RegisterOverrides = {},
+): SelfContext {
   const now = new Date().toISOString();
-  const cwd = process.cwd();
+  const cwd = overrides.cwd ?? process.cwd();
   const self: Peer = {
     id: generatePeerId(),
     pid: process.pid,
     cwd,
-    git_root: resolveGitRoot(cwd),
+    git_root:
+      overrides.git_root !== undefined ? overrides.git_root : resolveGitRoot(cwd),
     summary: "",
     registered_at: now,
     last_seen: now,
+    host: overrides.host !== undefined ? overrides.host : hostname(),
   };
   upsertPeer(db, self);
   return {
@@ -51,6 +68,7 @@ export function registerSelf(db: Database.Database): SelfContext {
     pid: self.pid,
     cwd: self.cwd,
     git_root: self.git_root,
+    host: self.host,
   };
 }
 

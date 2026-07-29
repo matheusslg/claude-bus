@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS peers (
   git_root      TEXT,
   summary       TEXT NOT NULL DEFAULT '',
   registered_at TEXT NOT NULL,
-  last_seen     TEXT NOT NULL
+  last_seen     TEXT NOT NULL,
+  host          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -41,19 +42,35 @@ export function openDb(path: string = DEFAULT_DB_PATH): Database.Database {
   db.pragma("synchronous = NORMAL");
   db.pragma("busy_timeout = 2000");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so columns added
+// after a DB was first created must be back-filled with an explicit ALTER.
+// Idempotent: only adds a column the live table is missing. No data is touched.
+function migrate(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info(peers)`).all() as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+  if (!cols.has("host")) {
+    db.exec(`ALTER TABLE peers ADD COLUMN host TEXT`);
+  }
 }
 
 export function upsertPeer(db: Database.Database, peer: Peer): void {
   db.prepare(
-    `INSERT INTO peers (id, pid, cwd, git_root, summary, registered_at, last_seen)
-     VALUES (@id, @pid, @cwd, @git_root, @summary, @registered_at, @last_seen)
+    `INSERT INTO peers (id, pid, cwd, git_root, summary, registered_at, last_seen, host)
+     VALUES (@id, @pid, @cwd, @git_root, @summary, @registered_at, @last_seen, @host)
      ON CONFLICT(id) DO UPDATE SET
        pid = excluded.pid,
        cwd = excluded.cwd,
        git_root = excluded.git_root,
        summary = excluded.summary,
-       last_seen = excluded.last_seen`,
+       last_seen = excluded.last_seen,
+       host = excluded.host`,
   ).run(peer);
 }
 
