@@ -1,6 +1,6 @@
 {
   "name": "claude-bus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP message bus for cross-session Claude Code communication with persistent log",
   "type": "module",
   "bin": {
